@@ -68,27 +68,29 @@ volatile uint64_t last_btn_red_time = 0;
 volatile uint64_t last_btn_blue_time = 0;
 volatile uint64_t last_btn_white_time = 0;
 
-// Variaveis compartilhadas com IRQ do PWM
-static const uint8_t *volatile audio_data = NULL;
-static volatile uint32_t audio_length = 0;
-static volatile uint32_t audio_position = 0;
-static volatile int audio_playing = 0;
+// Struct compartilhado com IRQ do PWM
+volatile struct {
+    const uint8_t *data;
+    uint32_t length;
+    uint32_t position;
+    int playing;
+} audio_state = {NULL, 0, 0, 0};
 
 //---------------------------- CALLBACKS -------------------------------------
 
 void pwm_interrupt_handler(void) {
     pwm_clear_irq(pwm_gpio_to_slice_num(AUDIO_PIN));
-    if (audio_playing && audio_data != NULL) {
-        if (audio_position < (audio_length << 3) - 1) {
-            int sample = audio_data[audio_position >> 3];
+    if (audio_state.playing && audio_state.data != NULL) {
+        if (audio_state.position < (audio_state.length << 3) - 1) {
+            int sample = audio_state.data[audio_state.position >> 3];
             // Amplifica: expande desvio do centro (128) por 2x
             int amplified = 128 + (sample - 128) * 2;
             if (amplified > 255) amplified = 255;
             if (amplified < 0) amplified = 0;
             pwm_set_gpio_level(AUDIO_PIN, amplified);
-            audio_position++;
+            audio_state.position++;
         } else {
-            audio_playing = 0;
+            audio_state.playing = 0;
             pwm_set_gpio_level(AUDIO_PIN, 0);
         }
     } else {
@@ -143,14 +145,14 @@ void led_on(int cor) {
 }
 
 void play_audio(const uint8_t *data, uint32_t length) {
-    audio_data = data;
-    audio_length = length;
-    audio_position = 0;
-    audio_playing = 1;
+    audio_state.data = data;
+    audio_state.length = length;
+    audio_state.position = 0;
+    audio_state.playing = 1;
 }
 
 void stop_audio(void) {
-    audio_playing = 0;
+    audio_state.playing = 0;
     pwm_set_gpio_level(AUDIO_PIN, 0);
 }
 
