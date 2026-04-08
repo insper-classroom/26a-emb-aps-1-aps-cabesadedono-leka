@@ -68,30 +68,29 @@ volatile uint64_t last_btn_red_time = 0;
 volatile uint64_t last_btn_blue_time = 0;
 volatile uint64_t last_btn_white_time = 0;
 
-const uint8_t *volatile audio_data = NULL;
-volatile uint32_t audio_length = 0;
-volatile uint32_t audio_position = 0;
-volatile int audio_playing = 0;
-
-int sequence[SEQ_LENGTH];
-int ranking[MAX_RANKING];
-int ranking_count = 0;
+// Struct compartilhado com IRQ do PWM
+volatile struct {
+    const uint8_t *data;
+    uint32_t length;
+    uint32_t position;
+    int playing;
+} audio_state = {NULL, 0, 0, 0};
 
 //---------------------------- CALLBACKS -------------------------------------
 
 void pwm_interrupt_handler(void) {
     pwm_clear_irq(pwm_gpio_to_slice_num(AUDIO_PIN));
-    if (audio_playing && audio_data != NULL) {
-        if (audio_position < (audio_length << 3) - 1) {
-            int sample = audio_data[audio_position >> 3];
+    if (audio_state.playing && audio_state.data != NULL) {
+        if (audio_state.position < (audio_state.length << 3) - 1) {
+            int sample = audio_state.data[audio_state.position >> 3];
             // Amplifica: expande desvio do centro (128) por 2x
             int amplified = 128 + (sample - 128) * 2;
             if (amplified > 255) amplified = 255;
             if (amplified < 0) amplified = 0;
             pwm_set_gpio_level(AUDIO_PIN, amplified);
-            audio_position++;
+            audio_state.position++;
         } else {
-            audio_playing = 0;
+            audio_state.playing = 0;
             pwm_set_gpio_level(AUDIO_PIN, 0);
         }
     } else {
@@ -146,14 +145,14 @@ void led_on(int cor) {
 }
 
 void play_audio(const uint8_t *data, uint32_t length) {
-    audio_data = data;
-    audio_length = length;
-    audio_position = 0;
-    audio_playing = 1;
+    audio_state.data = data;
+    audio_state.length = length;
+    audio_state.position = 0;
+    audio_state.playing = 1;
 }
 
 void stop_audio(void) {
-    audio_playing = 0;
+    audio_state.playing = 0;
     pwm_set_gpio_level(AUDIO_PIN, 0);
 }
 
@@ -163,7 +162,7 @@ void play_color_audio(int cor) {
     else if (cor == 3) play_audio(YELLOW_DATA, YELLOW_DATA_LENGTH);
 }
 
-void gerar_sequencia(void) {
+void gerar_sequencia(int *sequence) {
     for (int i = 0; i < SEQ_LENGTH; i++) {
         sequence[i] = (rand() % 3) + 1;
     }
@@ -195,29 +194,29 @@ void draw_text_centered(int y, const char *text, uint8_t size) {
 
 //---------------------------- RANKING ----------------------------------------
 
-void ranking_insert(int score) {
+void ranking_insert(int score, int *ranking, int *ranking_count) {
     if (score <= 0) return;
 
-    int pos = ranking_count;
-    for (int i = 0; i < ranking_count; i++) {
+    int pos = *ranking_count;
+    for (int i = 0; i < *ranking_count; i++) {
         if (score > ranking[i]) {
             pos = i;
             break;
         }
     }
 
-    int limit = ranking_count < MAX_RANKING ? ranking_count : MAX_RANKING - 1;
+    int limit = *ranking_count < MAX_RANKING ? *ranking_count : MAX_RANKING - 1;
     for (int i = limit; i > pos; i--) {
         ranking[i] = ranking[i - 1];
     }
     ranking[pos] = score;
 
-    if (ranking_count < MAX_RANKING) {
-        ranking_count++;
+    if (*ranking_count < MAX_RANKING) {
+        (*ranking_count)++;
     }
 }
 
-void ranking_save(void) {
+void ranking_save(int *ranking, int ranking_count) {
     // Buffer alinhado a 256 bytes (tamanho minimo de escrita na flash)
     uint8_t buf[FLASH_PAGE_SIZE];
     memset(buf, 0xFF, sizeof(buf));
@@ -236,19 +235,19 @@ void ranking_save(void) {
     restore_interrupts(ints);
 }
 
-void ranking_load(void) {
+void ranking_load(int *ranking, int *ranking_count) {
     const uint8_t *flash_data = (const uint8_t *)(XIP_BASE + FLASH_RANKING_OFFSET);
     const uint32_t *data = (const uint32_t *)flash_data;
 
     if (data[0] != RANKING_MAGIC) {
         // Sem dados salvos — ranking vazio
-        ranking_count = 0;
-        memset(ranking, 0, sizeof(ranking));
+        *ranking_count = 0;
+        memset(ranking, 0, MAX_RANKING * sizeof(int));
         return;
     }
 
-    ranking_count = (int)data[1];
-    if (ranking_count > MAX_RANKING) ranking_count = MAX_RANKING;
+    *ranking_count = (int)data[1];
+    if (*ranking_count > MAX_RANKING) *ranking_count = MAX_RANKING;
     for (int i = 0; i < MAX_RANKING; i++) {
         ranking[i] = (int)data[2 + i];
     }
@@ -390,7 +389,7 @@ void lcd_victory(void) {
     draw_text_centered(180, "PERFEITO!", 3);
 }
 
-void lcd_ranking_screen(void) {
+void lcd_ranking_screen(int *ranking, int ranking_count) {
     gfx_clear();
 
     gfx_drawRect(0, 0, SCREEN_W, SCREEN_H, ILI9341_WHITE, 2);
@@ -512,13 +511,17 @@ int main() {
     setup_display();
     sleep_ms(50);
     setup_audio();
-    gerar_sequencia();
 
-    ranking_load();
+    int sequence[SEQ_LENGTH];
+    int ranking[MAX_RANKING];
+    int ranking_count = 0;
+
+    gerar_sequencia(sequence);
+
+    ranking_load(ranking, &ranking_count);
 
     repeating_timer_t timer_0;
     alarm_id_t alarm;
-    int timer_0_running = 0;
     int blink_count = 0;
     int blink_state = 0;
 
@@ -549,7 +552,7 @@ int main() {
                 btn_pressed = -1;
                 alarm_flag = 0;
 
-                gerar_sequencia();
+                gerar_sequencia(sequence);
                 level = 1;
                 show_idx = 0;
                 color_on = 0;
@@ -559,7 +562,7 @@ int main() {
                 lcd_countdown(countdown_val);
                 add_alarm_in_ms(600, alarm_callback, NULL, false);
                 state = 8;
-            } else if (btn_pressed != -1) {
+            } else {
                 btn_pressed = -1;
             }
         }
@@ -614,15 +617,14 @@ int main() {
             if (alarm_flag) {
                 alarm_flag = 0;
                 final_score = level - 1;
-                ranking_insert(final_score);
-                ranking_save();
+                ranking_insert(final_score, ranking, &ranking_count);
+                ranking_save(ranking, ranking_count);
                 play_audio(ERROR_DATA, ERROR_DATA_LENGTH);
                 lcd_game_over(final_score);
                 state = 4;
                 blink_count = 0;
                 blink_state = 0;
                 add_repeating_timer_ms(200, timer_0_callback, NULL, &timer_0);
-                timer_0_running = 1;
             }
             if (btn_pressed != -1) {
                 cancel_alarm(alarm);
@@ -637,16 +639,15 @@ int main() {
                 } else {
                     btn_pressed = -1;
                     final_score = level - 1;
-                    ranking_insert(final_score);
-                    ranking_save();
+                    ranking_insert(final_score, ranking, &ranking_count);
+                    ranking_save(ranking, ranking_count);
                     play_audio(ERROR_DATA, ERROR_DATA_LENGTH);
                     lcd_game_over(final_score);
                     state = 4;
                     blink_count = 0;
                     blink_state = 0;
                     add_repeating_timer_ms(200, timer_0_callback, NULL, &timer_0);
-                    timer_0_running = 1;
-                }
+                    }
             }
         }
 
@@ -662,8 +663,8 @@ int main() {
                 level++;
                 if (level > SEQ_LENGTH) {
                     final_score = SEQ_LENGTH;
-                    ranking_insert(final_score);
-                    ranking_save();
+                    ranking_insert(final_score, ranking, &ranking_count);
+                    ranking_save(ranking, ranking_count);
                     play_audio(VICTORY_DATA, VICTORY_DATA_LENGTH);
                     lcd_victory();
                     state = 5;
@@ -671,8 +672,7 @@ int main() {
                     blink_state = 0;
                     show_idx = 0;
                     add_repeating_timer_ms(150, timer_0_callback, NULL, &timer_0);
-                    timer_0_running = 1;
-                } else {
+                    } else {
                     lcd_show_level(level);
                     state = 1;
                     show_idx = 0;
@@ -700,7 +700,6 @@ int main() {
             blink_count++;
             if (blink_count >= 6) {
                 cancel_repeating_timer(&timer_0);
-                timer_0_running = 0;
                 g_timer_0 = 0;
                 all_leds_off();
                 stop_audio();
@@ -719,7 +718,6 @@ int main() {
             blink_count++;
             if (blink_count >= 16) {
                 cancel_repeating_timer(&timer_0);
-                timer_0_running = 0;
                 g_timer_0 = 0;
                 all_leds_off();
                 stop_audio();
@@ -732,7 +730,7 @@ int main() {
         if (state == 6) {
             if (btn_pressed != -1) {
                 btn_pressed = -1;
-                lcd_ranking_screen();
+                lcd_ranking_screen(ranking, ranking_count);
                 state = 7;
             }
         }
